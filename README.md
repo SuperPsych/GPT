@@ -1,0 +1,1 @@
+g++ -std=c++17 -O3 -march=native -ffast-math -fopenmp main.cpp -o main.exe
