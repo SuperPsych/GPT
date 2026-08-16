@@ -48,9 +48,9 @@ struct GPT{
         }
     }
 
-    vector<vector<double>> forward(const vector<int>& tokens) {
+    vector<vector<float>> forward(const vector<int>& tokens) {
         int n = tokens.size();
-        vector<vector<double>> x(n, vector<double>(dim_model));
+        vector<vector<float>> x(n, vector<float>(dim_model));
         for (int i = 0; i < n; i++) {
             for (int d = 0; d < dim_model; d++) {
                 x[i][d] = W_e.at(tokens[i], d);
@@ -60,173 +60,177 @@ struct GPT{
         for (int l = 0; l < num_layers; l++) {
             int num_heads = attention_layers[l].heads.size();
 
-            vector<vector<double>> normed(n);
+            Matrix normed(n, dim_model);
             for (int i = 0; i < n; i++) {
-                normed[i] = attn_norms[l].forward(x[i]);
+                vector<float> normed_i = attn_norms[l].forward(x[i]);
+                for (int d = 0; d < dim_model; d++) normed.at(i, d) = normed_i[d];
             }
 
-            vector<vector<double>> concat(n, vector<double>(num_heads * dim_head));
+            vector<vector<float>> concat(n, vector<float>(num_heads * dim_head));
             for (int h = 0; h < num_heads; h++) {
                 AttentionScratch scratch(n, dim_head, dim_model);
-                auto head_out = attention_layers[l].heads[h].forward(normed, scratch);
+                Matrix& head_out = attention_layers[l].heads[h].forward(normed, scratch);
                 for (int i = 0; i < n; i++) {
                     for (int d = 0; d < dim_head; d++) {
-                        concat[i][h * dim_head + d] = head_out[i][d];
+                        concat[i][h * dim_head + d] = head_out.at(i, d);
                     }
                 }
             }
 
             for (int i = 0; i < n; i++) {
-                vector<double> proj = W_o_layers[l].times(concat[i]);
+                vector<float> proj = W_o_layers[l].times(concat[i]);
                 for (int d = 0; d < dim_model; d++) x[i][d] += proj[d];
             }
 
             for (int i = 0; i < n; i++) {
-                vector<double> normed_ffn = ffn_norms[l].forward(x[i]);
-                vector<double> ffn_out = ffn_layers[l].forward(normed_ffn);
+                vector<float> normed_ffn = ffn_norms[l].forward(x[i]);
+                vector<float> ffn_out = ffn_layers[l].forward(normed_ffn);
                 for (int d = 0; d < dim_model; d++) x[i][d] += ffn_out[d];
             }
         }
 
-        vector<vector<double>> logits(n, vector<double>(vocab_size));
+        vector<vector<float>> logits(n, vector<float>(vocab_size));
         for (int i = 0; i < n; i++) {
-            vector<double> normed_final = final_norm.forward(x[i]);
+            vector<float> normed_final = final_norm.forward(x[i]);
             logits[i] = W_u.times(normed_final);
         }
         return logits;
     }
 
-    vector<vector<double>> forward_train(const vector<int>& tokens, GPTScratch& s) {
+    // Training hot path: buffers are owned by GPTScratch and reused across
+    // examples/tokens/layers (no per-call allocation), and every projection
+    // (Q/K/V, W_o, FFN gate/up/down, W_u) is one GEMM over the whole sequence
+    // instead of a per-token times() loop. RMSNorm and RoPE stay per-token
+    // since neither is a matmul.
+    Matrix& forward_train(const vector<int>& tokens, GPTScratch& s) {
         int n = tokens.size();
         s.tokens = tokens;
         s.set_n(n);
-        vector<vector<double>> x(n, vector<double>(dim_model));
         for (int i = 0; i < n; i++) {
             for (int d = 0; d < dim_model; d++) {
-                x[i][d] = W_e.at(tokens[i], d);
+                s.x_buf.at(i, d) = W_e.at(tokens[i], d);
             }
         }
 
         for (int l = 0; l < num_layers; l++) {
             int num_heads = attention_layers[l].heads.size();
 
-            for (int i = 0; i < n; i++) s.x_pre_attn[l][i] = x[i];
-
-            vector<vector<double>> normed(n);
             for (int i = 0; i < n; i++) {
-                normed[i] = attn_norms[l].forward(x[i]);
+                span<float> row = s.x_buf.row(i);
+                copy(row.begin(), row.end(), s.x_pre_attn[l][i].begin());
             }
 
-            vector<vector<double>> concat(n, vector<double>(num_heads * dim_head));
+            for (int i = 0; i < n; i++) {
+                span<float> x_row = s.x_buf.row(i);
+                span<float> normed_row = s.normed_buf.row(i);
+                attn_norms[l].forward(x_row, normed_row);
+            }
+
             for (int h = 0; h < num_heads; h++) {
-                auto head_out = attention_layers[l].heads[h].forward(normed, s.attn_scratch[l][h]);
+                Matrix& head_out = attention_layers[l].heads[h].forward(s.normed_buf, s.attn_scratch[l][h]);
                 for (int i = 0; i < n; i++) {
                     for (int d = 0; d < dim_head; d++) {
-                        concat[i][h * dim_head + d] = head_out[i][d];
+                        s.concat[l].at(i, h * dim_head + d) = head_out.at(i, d);
                     }
                 }
             }
-            for (int i = 0; i < n; i++) s.concat[l][i] = concat[i];
 
+            W_o_layers[l].times(s.concat[l], s.proj_buf, n);
             for (int i = 0; i < n; i++) {
-                vector<double> proj = W_o_layers[l].times(concat[i]);
-                for (int d = 0; d < dim_model; d++) x[i][d] += proj[d];
+                for (int d = 0; d < dim_model; d++) s.x_buf.at(i, d) += s.proj_buf.at(i, d);
             }
 
-            for (int i = 0; i < n; i++) s.x_pre_ffn[l][i] = x[i];
+            for (int i = 0; i < n; i++) {
+                span<float> row = s.x_buf.row(i);
+                copy(row.begin(), row.end(), s.x_pre_ffn[l][i].begin());
+            }
 
             for (int i = 0; i < n; i++) {
-                vector<double> normed_ffn = ffn_norms[l].forward(x[i]);
-                vector<double> ffn_out = ffn_layers[l].forward_train(normed_ffn, s.ffn_scratch[l][i]);
-                for (int d = 0; d < dim_model; d++) x[i][d] += ffn_out[d];
+                span<float> x_row = s.x_buf.row(i);
+                span<float> normed_row = s.normed_buf.row(i);
+                ffn_norms[l].forward(x_row, normed_row);
+            }
+            Matrix& ffn_out = ffn_layers[l].forward_train(s.normed_buf, n, s.ffn_cache[l]);
+            for (int i = 0; i < n; i++) {
+                for (int d = 0; d < dim_model; d++) s.x_buf.at(i, d) += ffn_out.at(i, d);
             }
         }
 
-        for (int i = 0; i < n; i++) s.x_pre_final[i] = x[i];
-
-        vector<vector<double>> logits(n, vector<double>(vocab_size));
         for (int i = 0; i < n; i++) {
-            vector<double> normed_final = final_norm.forward(x[i]);
-            logits[i] = W_u.times(normed_final);
+            span<float> row = s.x_buf.row(i);
+            copy(row.begin(), row.end(), s.x_pre_final[i].begin());
         }
-        return logits;
+
+        for (int i = 0; i < n; i++) {
+            span<float> x_row = s.x_buf.row(i);
+            span<float> normed_row = s.normed_final_buf.row(i);
+            final_norm.forward(x_row, normed_row);
+        }
+        W_u.times(s.normed_final_buf, s.logits_buf, n);
+        return s.logits_buf;
     }
 
-    void backward(const vector<vector<double>>& grad_logits, GPTScratch& s) {
+    void backward(const Matrix& grad_logits, GPTScratch& s) {
         int n = s.n;
 
-        vector<vector<double>> dx(n, vector<double>(dim_model, 0.0));
+        // dW_u += grad_logits^T @ normed_final (cached from forward_train);
+        // dnormed_final = grad_logits @ W_u. Both are one GEMM instead of a
+        // per-token double loop.
+        Matrix::accumulate_weight_grad(grad_logits, s.normed_final_buf, s.dW_u, n);
+        W_u.backward_input(grad_logits, s.dnormed_final_buf, n, /*accumulate=*/false);
+
         for (int i = 0; i < n; i++) {
-            vector<double> normed_final_i = final_norm.forward(s.x_pre_final[i]);
-            for (int r = 0; r < vocab_size; r++) {
-                for (int c = 0; c < dim_model; c++) {
-                    s.dW_u.at(r,c) += grad_logits[i][r] * normed_final_i[c];
-                }
-            }
-            vector<double> dnormed(dim_model, 0.0);
-            for (int r = 0; r < vocab_size; r++) {
-                for (int c = 0; c < dim_model; c++) {
-                    dnormed[c] += W_u.at(r,c) * grad_logits[i][r];
-                }
-            }
-            dx[i] = final_norm.backward(s.x_pre_final[i], dnormed, s.dg_final_norm);
+            span<float> dnormed_row = s.dnormed_final_buf.row(i);
+            span<float> dx_row = s.dx_buf.row(i);
+            final_norm.backward(s.x_pre_final[i], dnormed_row, s.dg_final_norm, dx_row);
         }
 
         for (int l = num_layers - 1; l >= 0; l--) {
             int num_heads = attention_layers[l].heads.size();
 
-            vector<vector<double>> dnormed_ffn(n);
+            s.ffn_delta.clear();
+            Matrix& d_ffn = ffn_layers[l].backward(s.dx_buf, n, s.ffn_cache[l], s.ffn_delta);
+            Matrix::add(s.dW_ffn_gate[l], s.ffn_delta.W_gate_delta);
+            Matrix::add(s.dW_ffn_up[l], s.ffn_delta.W_up_delta);
+            Matrix::add(s.dW_ffn_down[l], s.ffn_delta.W_down_delta);
+
             for (int i = 0; i < n; i++) {
-                s.ffn_scratch[l][i].clear();
-                dnormed_ffn[i] = ffn_layers[l].backward(dx[i], s.ffn_scratch[l][i]);
-                Matrix::add(s.dW_ffn_gate[l], s.ffn_scratch[l][i].W_gate_delta);
-                Matrix::add(s.dW_ffn_up[l], s.ffn_scratch[l][i].W_up_delta);
-                Matrix::add(s.dW_ffn_down[l], s.ffn_scratch[l][i].W_down_delta);
-            }
-            for (int i = 0; i < n; i++) {
-                vector<double> d_from_ffn_norm = ffn_norms[l].backward(s.x_pre_ffn[l][i], dnormed_ffn[i], s.dg_ffn_norms[l]);
-                for (int d = 0; d < dim_model; d++) dx[i][d] += d_from_ffn_norm[d];
+                span<float> d_ffn_row = d_ffn.row(i);
+                ffn_norms[l].backward(s.x_pre_ffn[l][i], d_ffn_row, s.dg_ffn_norms[l], s.dffn_norm_scratch);
+                for (int d = 0; d < dim_model; d++) s.dx_buf.at(i, d) += s.dffn_norm_scratch[d];
             }
 
-            vector<vector<double>> dconcat(n, vector<double>(num_heads * dim_head, 0.0));
-            for (int i = 0; i < n; i++) {
-                for (int r = 0; r < dim_model; r++) {
-                    for (int c = 0; c < num_heads * dim_head; c++) {
-                        s.dW_o[l].at(r,c) += dx[i][r] * s.concat[l][i][c];
-                    }
-                }
-                for (int r = 0; r < dim_model; r++) {
-                    for (int c = 0; c < num_heads * dim_head; c++) {
-                        dconcat[i][c] += W_o_layers[l].at(r,c) * dx[i][r];
-                    }
-                }
-            }
+            // dW_o += dx_buf^T @ concat; dconcat = dx_buf @ W_o. Was a
+            // per-token double-nested loop for each; now one GEMM each.
+            Matrix::accumulate_weight_grad(s.dx_buf, s.concat[l], s.dW_o[l], n);
+            W_o_layers[l].backward_input(s.dx_buf, s.dconcat_buf, n, /*accumulate=*/false);
 
-            vector<vector<double>> dnormed_attn(n, vector<double>(dim_model, 0.0));
+            fill(s.dnormed_attn_buf.data.begin(), s.dnormed_attn_buf.data.begin() + (size_t)n * dim_model, 0.0f);
             for (int h = 0; h < num_heads; h++) {
-                vector<vector<double>> dhead_out(n, vector<double>(dim_head));
+                AttentionScratch& hs = s.attn_scratch[l][h];
                 for (int i = 0; i < n; i++) {
                     for (int d = 0; d < dim_head; d++) {
-                        dhead_out[i][d] = dconcat[i][h * dim_head + d];
+                        hs.grad_out_buf.at(i,d) = s.dconcat_buf.at(i, h * dim_head + d);
                     }
                 }
-                auto dnormed_h = attention_layers[l].heads[h].backward(dhead_out, s.attn_scratch[l][h]);
+                Matrix& dnormed_h = attention_layers[l].heads[h].backward(hs.grad_out_buf, hs);
                 for (int i = 0; i < n; i++) {
                     for (int d = 0; d < dim_model; d++) {
-                        dnormed_attn[i][d] += dnormed_h[i][d];
+                        s.dnormed_attn_buf.at(i, d) += dnormed_h.at(i,d);
                     }
                 }
             }
 
             for (int i = 0; i < n; i++) {
-                vector<double> d_from_attn_norm = attn_norms[l].backward(s.x_pre_attn[l][i], dnormed_attn[i], s.dg_attn_norms[l]);
-                for (int d = 0; d < dim_model; d++) dx[i][d] += d_from_attn_norm[d];
+                span<float> dnormed_attn_row = s.dnormed_attn_buf.row(i);
+                attn_norms[l].backward(s.x_pre_attn[l][i], dnormed_attn_row, s.dg_attn_norms[l], s.dattn_norm_scratch);
+                for (int d = 0; d < dim_model; d++) s.dx_buf.at(i, d) += s.dattn_norm_scratch[d];
             }
         }
 
         for (int i = 0; i < n; i++) {
             for (int d = 0; d < dim_model; d++) {
-                s.dW_e.at(s.tokens[i], d) += dx[i][d];
+                s.dW_e.at(s.tokens[i], d) += s.dx_buf.at(i, d);
             }
         }
     }
@@ -240,17 +244,17 @@ struct GPT{
         }
     }
 
-    vector<double> generate_step(int token) {
-        vector<double> x(dim_model);
+    vector<float> generate_step(int token) {
+        vector<float> x(dim_model);
         for (int d = 0; d < dim_model; d++) {
             x[d] = W_e.at(token, d);
         }
 
         for (int l = 0; l < num_layers; l++) {
             int num_heads = attention_layers[l].heads.size();
-            vector<double> normed = attn_norms[l].forward(x);
+            vector<float> normed = attn_norms[l].forward(x);
 
-            vector<double> concat(num_heads * dim_head);
+            vector<float> concat(num_heads * dim_head);
             for (int h = 0; h < num_heads; h++) {
                 auto head_out = attention_layers[l].heads[h].add_token(normed);
                 for (int d = 0; d < dim_head; d++) {
@@ -258,15 +262,15 @@ struct GPT{
                 }
             }
 
-            vector<double> proj = W_o_layers[l].times(concat);
+            vector<float> proj = W_o_layers[l].times(concat);
             for (int d = 0; d < dim_model; d++) x[d] += proj[d];
 
-            vector<double> normed_ffn = ffn_norms[l].forward(x);
-            vector<double> ffn_out = ffn_layers[l].forward(normed_ffn);
+            vector<float> normed_ffn = ffn_norms[l].forward(x);
+            vector<float> ffn_out = ffn_layers[l].forward(normed_ffn);
             for (int d = 0; d < dim_model; d++) x[d] += ffn_out[d];
         }
 
-        vector<double> normed_final = final_norm.forward(x);
+        vector<float> normed_final = final_norm.forward(x);
         return W_u.times(normed_final);
     }
 
@@ -320,29 +324,30 @@ struct GPT{
 
     double accumulate_gradients(const ChatExample& example, GPTScratch& scratch) {
         int n = (int)example.tokens.size();
-        auto logits = forward_train(example.tokens, scratch);
+        Matrix& logits = forward_train(example.tokens, scratch);
 
-        vector<vector<double>> grad_logits(n, vector<double>(vocab_size, 0.0));
+        fill(scratch.grad_logits.data.begin(), scratch.grad_logits.data.begin() + (size_t)n * vocab_size, 0.0f);
+
         double loss = 0.0;
         int target_count = 0;
         for (int i = 0; i + 1 < n; i++) {
             if (!example.mask[i + 1]) continue;
-            vector<double> probs = logits[i];
+            span<float> probs = logits.row(i);
             FFN::output_activation(probs);
             int target = example.tokens[i + 1];
-            loss -= log(max(probs[target], 1e-12));
+            loss -= log(max(probs[target], 1e-12f));
             for (int v = 0; v < vocab_size; v++) {
-                grad_logits[i][v] = probs[v] - (v == target ? 1.0 : 0.0);
+                scratch.grad_logits.at(i, v) = probs[v] - (v == target ? 1.0f : 0.0f);
             }
             target_count++;
         }
         if (target_count > 0) {
             loss /= target_count;
-            double scale = 1.0 / target_count;
-            for (auto& row : grad_logits) for (double& g : row) g *= scale;
+            float scale = 1.0f / target_count;
+            for (int idx = 0; idx < n * vocab_size; idx++) scratch.grad_logits.data[idx] *= scale;
         }
 
-        backward(grad_logits, scratch);
+        backward(scratch.grad_logits, scratch);
         return loss;
     }
 
@@ -387,8 +392,14 @@ struct GPT{
             thread_data.emplace_back(max_seq_len, num_layers, num_heads, dim_head, dim_model, hidden_dim, vocab_size);
         }
 
+        // Reshuffled every epoch (not just once): with epochs > 1 the same
+        // fixed batch composition would otherwise repeat on every pass.
+        mt19937 shuffle_rng(random_device{}());
+
         int step = 0, last_log_step = 0, last_checkpoint_step = 0;
         for (int epoch = 0; epoch < epochs; epoch++) {
+            shuffle(examples.begin(), examples.end(), shuffle_rng);
+
             double epoch_loss = 0.0;
             int counted = 0;
 

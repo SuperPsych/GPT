@@ -5,19 +5,19 @@ struct AdamState {
     Matrix m_W_e, v_W_e, m_W_u, v_W_u;
     vector<Matrix> m_W_o, v_W_o;
     vector<Matrix> m_ffn_gate, v_ffn_gate, m_ffn_up, v_ffn_up, m_ffn_down, v_ffn_down;
-    vector<vector<double>> m_attn_norms, v_attn_norms, m_ffn_norms, v_ffn_norms;
-    vector<double> m_final_norm, v_final_norm;
+    vector<vector<float>> m_attn_norms, v_attn_norms, m_ffn_norms, v_ffn_norms;
+    vector<float> m_final_norm, v_final_norm;
     vector<vector<Matrix>> m_W_q, v_W_q, m_W_k, v_W_k, m_W_v, v_W_v;
     int t = 0;
 
     AdamState(int num_layers, int num_heads, int dim_head, int dim_model, int hidden_dim, int vocab_size) :
         m_W_e(vocab_size, dim_model), v_W_e(vocab_size, dim_model),
         m_W_u(vocab_size, dim_model), v_W_u(vocab_size, dim_model),
-        m_attn_norms(num_layers, vector<double>(dim_model, 0.0)),
-        v_attn_norms(num_layers, vector<double>(dim_model, 0.0)),
-        m_ffn_norms(num_layers, vector<double>(dim_model, 0.0)),
-        v_ffn_norms(num_layers, vector<double>(dim_model, 0.0)),
-        m_final_norm(dim_model, 0.0), v_final_norm(dim_model, 0.0) {
+        m_attn_norms(num_layers, vector<float>(dim_model, 0.0f)),
+        v_attn_norms(num_layers, vector<float>(dim_model, 0.0f)),
+        m_ffn_norms(num_layers, vector<float>(dim_model, 0.0f)),
+        v_ffn_norms(num_layers, vector<float>(dim_model, 0.0f)),
+        m_final_norm(dim_model, 0.0f), v_final_norm(dim_model, 0.0f) {
 
         for (int l = 0; l < num_layers; l++) {
             m_W_o.emplace_back(dim_model, num_heads * dim_head);

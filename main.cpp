@@ -6,6 +6,7 @@ int main() {
     string merges_path = "data/merges.txt";
     string tokenizer_corpus_path = "data/tokenizer_corpus.txt";
     string checkpoint_path = "data/checkpoint.txt";
+    string examples_cache_path = "data/examples_cache.bin";
 
     int num_layers = 2, num_heads = 2, dim_head = 32, dim_model = 64, hidden_dim = 192;
     int target_vocab = 2000, max_seq_len = 512;
@@ -13,26 +14,54 @@ int main() {
     int batch_size = 16;
     double lr = 3e-4;
 
-    cout << "Loading conversations from " << dataset_path << "..." << endl;
-    auto conversations = ChatDataset::load_conversations(dataset_path);
-    cout << "Loaded " << conversations.size() << " conversations." << endl;
-
-    if (num_examples > (int)conversations.size()) num_examples = (int)conversations.size();
-    vector<vector<ChatTurn>> slice(conversations.begin(), conversations.begin() + num_examples);
+    int requested_examples = num_examples; // captured before any dataset-size clamping, so the
+                                            // cache key is stable whether or not conversations get loaded
 
     Tokenizer tok;
-    ifstream vocab_check(vocab_path);
-    if (vocab_check.good()) {
-        cout << "Loading existing tokenizer from " << vocab_path << "..." << endl;
-        tok.load(vocab_path, merges_path);
-    } else {
-        cout << "Training tokenizer on " << num_examples << " conversations..." << endl;
-        ofstream corpus_out(tokenizer_corpus_path);
-        for (auto& conv : slice) for (auto& turn : conv) corpus_out << turn.content << "\n";
-        corpus_out.close();
-        tok.train(tokenizer_corpus_path, target_vocab, 3, vocab_path, merges_path);
+    vector<ChatExample> examples;
+    {
+        // conversations only needs to be resident while building the tokenizer/examples;
+        // this block scope frees it (and any raw dataset text) before training starts.
+        vector<vector<ChatTurn>> conversations;
+        bool conversations_loaded = false;
+
+        ifstream vocab_check(vocab_path);
+        if (vocab_check.good()) {
+            cout << "Loading existing tokenizer from " << vocab_path << "..." << endl;
+            tok.load(vocab_path, merges_path);
+        } else {
+            cout << "Loading conversations from " << dataset_path << "..." << endl;
+            conversations = ChatDataset::load_conversations(dataset_path);
+            conversations_loaded = true;
+            cout << "Loaded " << conversations.size() << " conversations." << endl;
+            if (num_examples > (int)conversations.size()) num_examples = (int)conversations.size();
+
+            cout << "Training tokenizer on " << num_examples << " conversations..." << endl;
+            ofstream corpus_out(tokenizer_corpus_path);
+            for (int i = 0; i < num_examples; i++) for (auto& turn : conversations[i]) corpus_out << turn.content << "\n";
+            corpus_out.close();
+            tok.train(tokenizer_corpus_path, target_vocab, 3, vocab_path, merges_path);
+        }
+        cout << "Tokenizer vocab size: " << tok.vocab_size() << endl;
+
+        bool have_examples = ChatDataset::load_examples_cache(examples_cache_path, examples,
+                                                                tok.vocab_size(), max_seq_len, requested_examples);
+        if (have_examples) {
+            cout << "Loaded " << examples.size() << " training examples from cache (" << examples_cache_path << ")." << endl;
+        } else {
+            if (!conversations_loaded) {
+                cout << "Loading conversations from " << dataset_path << "..." << endl;
+                conversations = ChatDataset::load_conversations(dataset_path);
+                conversations_loaded = true;
+                cout << "Loaded " << conversations.size() << " conversations." << endl;
+                if (num_examples > (int)conversations.size()) num_examples = (int)conversations.size();
+            }
+            examples = ChatDataset::build_examples(conversations, tok, max_seq_len, num_examples);
+            cout << "Built " << examples.size() << " training examples." << endl;
+            ChatDataset::save_examples_cache(examples_cache_path, examples, tok.vocab_size(), max_seq_len, requested_examples);
+            cout << "Cached training examples to " << examples_cache_path << endl;
+        }
     }
-    cout << "Tokenizer vocab size: " << tok.vocab_size() << endl;
 
     GPT gpt(num_layers, num_heads, dim_head, dim_model, hidden_dim, tok.vocab_size(), max_seq_len);
     gpt.tokenizer = tok;
@@ -48,12 +77,16 @@ int main() {
                  << "). The checkpoint was trained with a different vocab.txt/merges.txt." << endl;
             return 1;
         }
+        if (gpt.max_seq_len != max_seq_len) {
+            cerr << "Fatal: checkpoint max_seq_len (" << gpt.max_seq_len
+                 << ") does not match the configured max_seq_len (" << max_seq_len
+                 << "). Training examples were built for a different sequence length than "
+                    "this checkpoint's architecture." << endl;
+            return 1;
+        }
     }
 
-    auto examples = ChatDataset::build_examples(slice, gpt.tokenizer, max_seq_len);
-    cout << "Built " << examples.size() << " training examples." << endl;
-
-    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, /*checkpoint_every=*/200, /*log_every=*/64);
+    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, /*checkpoint_every=*/10000, /*log_every=*/1000);
 
     gpt.save_checkpoint(checkpoint_path);
     cout << "Final checkpoint saved to " << checkpoint_path << endl;
@@ -63,11 +96,11 @@ int main() {
     string prompt = "User: hello\nAssistant:";
     auto prompt_ids = gpt.tokenize(prompt);
     vector<int> generated = prompt_ids;
-    vector<double> logits;
+    vector<float> logits;
     for (int id : prompt_ids) logits = gpt.generate_step(id);
     for (int step = 0; step < 40; step++) {
         int best = 0;
-        double best_val = -1e18;
+        float best_val = -1e18f;
         for (int v = 0; v < gpt.vocab_size; v++) {
             if (logits[v] > best_val) { best_val = logits[v]; best = v; }
         }

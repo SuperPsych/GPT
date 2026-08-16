@@ -1,0 +1,12 @@
+# build output
+*.exe
+*.o
+*.obj
+*.out
+
+# training data / artifacts (large, regenerated locally)
+data/*
+!data/vocab.txt
+!data/merges.txt
+!data/tokenizer_corpus.txt
+!data/checkpoint.txt

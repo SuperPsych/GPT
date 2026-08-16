@@ -14,92 +14,77 @@ struct FFN {
         W_down.randomize();
     }
 
-    static void SiLU(vector<double> &x) {
-        for (double& v : x) {
-            v = v / (1.0 + exp(-v));
+    static void SiLU(vector<float> &x) {
+        for (float& v : x) {
+            v = v / (1.0f + exp(-v));
         }
     }
-    static double silu_grad(double z) {
-        double s = 1.0 / (1.0 + exp(-z));
-        return s * (1.0 + z * (1.0 - s));
+    // Bounded variant for a Matrix's flat storage: only the first `count`
+    // elements (i.e. the first n rows) are touched, not the whole capacity.
+    static void SiLU(float* data, int count) {
+        for (int i = 0; i < count; i++) {
+            float v = data[i];
+            data[i] = v / (1.0f + exp(-v));
+        }
     }
-    static void output_activation(vector<double> &x) {
+    static float silu_grad(float z) {
+        float s = 1.0f / (1.0f + exp(-z));
+        return s * (1.0f + z * (1.0f - s));
+    }
+    template <typename Vec>
+    static void output_activation(Vec& x) {
         double max = *max_element(x.begin(), x.end());
         double sum = 0;
-        for(double& i : x){
+        for(auto& i : x){
             i = exp(i - max);
             sum += i;
         }
-        for(double& i : x){
+        for(auto& i : x){
             i/=sum;
         }
     }
 
-    vector<double> forward(const vector<double>& x) const {
-        vector<double> a_gate = W_gate.times(x);
+    vector<float> forward(const vector<float>& x) const {
+        vector<float> a_gate = W_gate.times(x);
         SiLU(a_gate);
-        vector<double> z_up = W_up.times(x);
-        vector<double> h(hidden_dim);
+        vector<float> z_up = W_up.times(x);
+        vector<float> h(hidden_dim);
         for (int i = 0; i < hidden_dim; i++) {
             h[i] = a_gate[i] * z_up[i];
         }
         return W_down.times(h);
     }
 
-    vector<double> forward_train(const vector<double>& x, FFNScratch& td) {
-        td.x = x;
-        W_gate.times(x, td.z_gate);
-        td.a_gate = td.z_gate;
-        SiLU(td.a_gate);
-        W_up.times(x, td.z_up);
-        for (int i = 0; i < hidden_dim; i++) {
-            td.h[i] = td.a_gate[i] * td.z_up[i];
+    // Whole-sequence forward: X is (n x dim_model), everything below is a
+    // GEMM over all n tokens at once instead of a per-token times() loop.
+    Matrix& forward_train(const Matrix& X, int n, FFNActivations& cache) {
+        copy(X.data.begin(), X.data.begin() + (size_t)n * dim_model, cache.x.data.begin());
+        W_gate.times(X, cache.z_gate, n);
+        copy(cache.z_gate.data.begin(), cache.z_gate.data.begin() + (size_t)n * hidden_dim, cache.a_gate.data.begin());
+        SiLU(cache.a_gate.data.data(), n * hidden_dim);
+        W_up.times(X, cache.z_up, n);
+        for (int idx = 0; idx < n * hidden_dim; idx++) {
+            cache.h.data[idx] = cache.a_gate.data[idx] * cache.z_up.data[idx];
         }
-        return W_down.times(td.h);
+        W_down.times(cache.h, cache.out, n);
+        return cache.out;
     }
 
-    vector<double> backward(const vector<double>& grad_out, FFNScratch& td) {
-        for (int r = 0; r < W_down.num_rows; r++) {
-            for (int c = 0; c < W_down.num_cols; c++) {
-                td.W_down_delta.at(r,c) += grad_out[r] * td.h[c];
-            }
-        }
-        vector<double> dh(hidden_dim, 0.0);
-        for (int r = 0; r < W_down.num_rows; r++) {
-            for (int c = 0; c < W_down.num_cols; c++) {
-                dh[c] += W_down.at(r,c) * grad_out[r];
-            }
+    Matrix& backward(const Matrix& grad_out, int n, const FFNActivations& cache, FFNDelta& delta) {
+        Matrix::accumulate_weight_grad(grad_out, cache.h, delta.W_down_delta, n);
+        W_down.backward_input(grad_out, delta.dh, n);
+
+        for (int idx = 0; idx < n * hidden_dim; idx++) {
+            float da_gate = delta.dh.data[idx] * cache.z_up.data[idx];
+            delta.dz_up.data[idx] = delta.dh.data[idx] * cache.a_gate.data[idx];
+            delta.dz_gate.data[idx] = da_gate * silu_grad(cache.z_gate.data[idx]);
         }
 
-        vector<double> dz_gate(hidden_dim), dz_up(hidden_dim);
-        for (int i = 0; i < hidden_dim; i++) {
-            double da_gate = dh[i] * td.z_up[i];
-            dz_up[i] = dh[i] * td.a_gate[i];
-            dz_gate[i] = da_gate * silu_grad(td.z_gate[i]);
-        }
+        Matrix::accumulate_weight_grad(delta.dz_gate, cache.x, delta.W_gate_delta, n);
+        Matrix::accumulate_weight_grad(delta.dz_up, cache.x, delta.W_up_delta, n);
 
-        for (int r = 0; r < W_gate.num_rows; r++) {
-            for (int c = 0; c < W_gate.num_cols; c++) {
-                td.W_gate_delta.at(r,c) += dz_gate[r] * td.x[c];
-            }
-        }
-        for (int r = 0; r < W_up.num_rows; r++) {
-            for (int c = 0; c < W_up.num_cols; c++) {
-                td.W_up_delta.at(r,c) += dz_up[r] * td.x[c];
-            }
-        }
-
-        vector<double> dx(dim_model, 0.0);
-        for (int r = 0; r < W_gate.num_rows; r++) {
-            for (int c = 0; c < W_gate.num_cols; c++) {
-                dx[c] += W_gate.at(r,c) * dz_gate[r];
-            }
-        }
-        for (int r = 0; r < W_up.num_rows; r++) {
-            for (int c = 0; c < W_up.num_cols; c++) {
-                dx[c] += W_up.at(r,c) * dz_up[r];
-            }
-        }
-        return dx;
+        W_gate.backward_input(delta.dz_gate, delta.dx, n, /*accumulate=*/false);
+        W_up.backward_input(delta.dz_up, delta.dx, n, /*accumulate=*/true);
+        return delta.dx;
     }
 };

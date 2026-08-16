@@ -153,12 +153,33 @@ struct Tokenizer {
     static string normalize(const string& text, bool lowercase, bool split_punct, bool norm_ws) {
         string result = text;
         if (norm_ws) {
-            static const regex ws_regex("\\s+");
-            result = regex_replace(result, ws_regex, " ");
+            string out;
+            out.reserve(result.size());
+            bool in_ws = false;
+            for (unsigned char c : result) {
+                if (isspace(c)) {
+                    if (!in_ws) { out += ' '; in_ws = true; }
+                } else {
+                    out += (char)c;
+                    in_ws = false;
+                }
+            }
+            result = move(out);
         }
         if (split_punct) {
-            static const regex punct_regex("([.,!?;:()\\[\\]{}\"'])");
-            result = regex_replace(result, punct_regex, " $1 ");
+            static const string punct_chars = ".,!?;:()[]{}\"'";
+            string out;
+            out.reserve(result.size() * 2);
+            for (char c : result) {
+                if (punct_chars.find(c) != string::npos) {
+                    out += ' ';
+                    out += c;
+                    out += ' ';
+                } else {
+                    out += c;
+                }
+            }
+            result = move(out);
         }
         if (lowercase) {
             transform(result.begin(), result.end(), result.begin(), ::tolower);
