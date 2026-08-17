@@ -8,12 +8,14 @@
 struct AttentionHead {
     Matrix W_q, W_k, W_v;
     Matrix K, V;
-    AttentionHead(int dim_head, int dim_model) :
+    AttentionHead(int dim_head, int dim_model, int max_seq_len) :
         W_q(dim_head, dim_model), W_k(dim_head, dim_model), W_v(dim_head, dim_model),
         K(0, dim_head), V(0, dim_head) {
         W_q.randomize();
         W_k.randomize();
         W_v.randomize();
+        K.reserve_rows(max_seq_len);
+        V.reserve_rows(max_seq_len);
     }
     vector<float> add_token(const vector<float>& x){
         span<float> k_row = K.add_row();

@@ -25,6 +25,19 @@ struct Matrix {
         return data[r * num_cols + c];
     }
 
+    // Reserves capacity for `rows` rows without changing size, so a subsequent
+    // run of add_row() up to that many rows never reallocates.
+    void reserve_rows(int rows) {
+        data.reserve((size_t)rows * num_cols);
+    }
+
+    // Resets to zero rows while keeping any reserved capacity (unlike
+    // assigning a fresh Matrix, which would drop it).
+    void clear_rows() {
+        data.clear();
+        num_rows = 0;
+    }
+
     span<float> add_row() {
         int offset = data.size();
         data.resize(data.size() + num_cols);

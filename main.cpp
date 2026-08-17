@@ -10,7 +10,7 @@ int main() {
 
     int num_layers = 2, num_heads = 2, dim_head = 32, dim_model = 64, hidden_dim = 192;
     int target_vocab = 2000, max_seq_len = 512;
-    int num_examples = 500000, epochs = 1;
+    int num_examples = 500000, epochs = 4;
     int batch_size = 16;
     double lr = 3e-4;
 
@@ -83,7 +83,7 @@ int main() {
         }
     }
 
-    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, 10000, 1000);
+    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, 8192, 1024);
 
     gpt.save_checkpoint(checkpoint_path);
     cout << "Final checkpoint saved to " << checkpoint_path << endl;

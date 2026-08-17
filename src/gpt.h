@@ -30,6 +30,7 @@ struct GPT{
         final_norm(dim_model) {
         W_e.randomize();
         W_u.randomize();
+        RoPE::precompute(dim_head, max_seq_len);
 
         attention_layers.reserve(num_layers);
         W_o_layers.reserve(num_layers);
@@ -37,7 +38,7 @@ struct GPT{
         attn_norms.reserve(num_layers);
         ffn_norms.reserve(num_layers);
         for (int l = 0; l < num_layers; l++) {
-            attention_layers.emplace_back(num_heads, dim_head, dim_model);
+            attention_layers.emplace_back(num_heads, dim_head, dim_model, max_seq_len);
 
             W_o_layers.emplace_back(dim_model, num_heads * dim_head);
             W_o_layers.back().randomize();
@@ -228,8 +229,8 @@ struct GPT{
     void reset_cache() {
         for (auto& layer : attention_layers) {
             for (auto& head : layer.heads) {
-                head.K = Matrix(0, dim_head);
-                head.V = Matrix(0, dim_head);
+                head.K.clear_rows();
+                head.V.clear_rows();
             }
         }
     }
