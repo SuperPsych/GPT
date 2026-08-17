@@ -97,11 +97,6 @@ struct GPT{
         return logits;
     }
 
-    // Training hot path: buffers are owned by GPTScratch and reused across
-    // examples/tokens/layers (no per-call allocation), and every projection
-    // (Q/K/V, W_o, FFN gate/up/down, W_u) is one GEMM over the whole sequence
-    // instead of a per-token times() loop. RMSNorm and RoPE stay per-token
-    // since neither is a matmul.
     Matrix& forward_train(const vector<int>& tokens, GPTScratch& s) {
         int n = tokens.size();
         s.tokens = tokens;
@@ -173,11 +168,8 @@ struct GPT{
     void backward(const Matrix& grad_logits, GPTScratch& s) {
         int n = s.n;
 
-        // dW_u += grad_logits^T @ normed_final (cached from forward_train);
-        // dnormed_final = grad_logits @ W_u. Both are one GEMM instead of a
-        // per-token double loop.
         Matrix::accumulate_weight_grad(grad_logits, s.normed_final_buf, s.dW_u, n);
-        W_u.backward_input(grad_logits, s.dnormed_final_buf, n, /*accumulate=*/false);
+        W_u.backward_input(grad_logits, s.dnormed_final_buf, n, false);
 
         for (int i = 0; i < n; i++) {
             span<float> dnormed_row = s.dnormed_final_buf.row(i);
@@ -200,10 +192,8 @@ struct GPT{
                 for (int d = 0; d < dim_model; d++) s.dx_buf.at(i, d) += s.dffn_norm_scratch[d];
             }
 
-            // dW_o += dx_buf^T @ concat; dconcat = dx_buf @ W_o. Was a
-            // per-token double-nested loop for each; now one GEMM each.
             Matrix::accumulate_weight_grad(s.dx_buf, s.concat[l], s.dW_o[l], n);
-            W_o_layers[l].backward_input(s.dx_buf, s.dconcat_buf, n, /*accumulate=*/false);
+            W_o_layers[l].backward_input(s.dx_buf, s.dconcat_buf, n, false);
 
             fill(s.dnormed_attn_buf.data.begin(), s.dnormed_attn_buf.data.begin() + (size_t)n * dim_model, 0.0f);
             for (int h = 0; h < num_heads; h++) {
@@ -392,8 +382,6 @@ struct GPT{
             thread_data.emplace_back(max_seq_len, num_layers, num_heads, dim_head, dim_model, hidden_dim, vocab_size);
         }
 
-        // Reshuffled every epoch (not just once): with epochs > 1 the same
-        // fixed batch composition would otherwise repeat on every pass.
         mt19937 shuffle_rng(random_device{}());
 
         int step = 0, last_log_step = 0, last_checkpoint_step = 0;

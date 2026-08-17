@@ -19,8 +19,6 @@ struct FFN {
             v = v / (1.0f + exp(-v));
         }
     }
-    // Bounded variant for a Matrix's flat storage: only the first `count`
-    // elements (i.e. the first n rows) are touched, not the whole capacity.
     static void SiLU(float* data, int count) {
         for (int i = 0; i < count; i++) {
             float v = data[i];
@@ -55,8 +53,6 @@ struct FFN {
         return W_down.times(h);
     }
 
-    // Whole-sequence forward: X is (n x dim_model), everything below is a
-    // GEMM over all n tokens at once instead of a per-token times() loop.
     Matrix& forward_train(const Matrix& X, int n, FFNActivations& cache) {
         copy(X.data.begin(), X.data.begin() + (size_t)n * dim_model, cache.x.data.begin());
         W_gate.times(X, cache.z_gate, n);
@@ -83,8 +79,8 @@ struct FFN {
         Matrix::accumulate_weight_grad(delta.dz_gate, cache.x, delta.W_gate_delta, n);
         Matrix::accumulate_weight_grad(delta.dz_up, cache.x, delta.W_up_delta, n);
 
-        W_gate.backward_input(delta.dz_gate, delta.dx, n, /*accumulate=*/false);
-        W_up.backward_input(delta.dz_up, delta.dx, n, /*accumulate=*/true);
+        W_gate.backward_input(delta.dz_gate, delta.dx, n, false);
+        W_up.backward_input(delta.dz_up, delta.dx, n, true);
         return delta.dx;
     }
 };

@@ -69,10 +69,6 @@ struct Matrix {
         clear(a.data);
     }
 
-    // Moments (m, v) are kept as float too (this is a from-scratch fp32
-    // training setup, not a mixed-precision one), but the hyperparameters
-    // stay double since they're scalars evaluated once per weight per step,
-    // nowhere near the hot per-token loops.
     static void adamw_update(vector<float>& W, const vector<float>& dW, vector<float>& m, vector<float>& v,
                               double lr, double beta1, double beta2, double eps, double weight_decay,
                               int t, double grad_scale) {
@@ -111,13 +107,6 @@ struct Matrix {
         return y;
     }
 
-    // Batched projection: Y[0:n] = X[0:n] @ W^T, where `this` is W (dim_out x
-    // dim_in, PyTorch-style), X is (n x dim_in), Y is (n x dim_out). Unlike a
-    // per-token times() call, this computes 4 output rows at once per token
-    // using 4 independent accumulators, which breaks the single-accumulator
-    // FMA dependency chain a plain dot product has and lets the CPU actually
-    // issue back-to-back FMAs instead of stalling on latency. X/Y only need
-    // their first n rows valid; extra capacity rows are left untouched.
     void times(const Matrix& X, Matrix& Y, int n) const {
         int dim_in = num_cols;
         int dim_out = num_rows;
@@ -149,13 +138,6 @@ struct Matrix {
         }
     }
 
-    // Batched backprop-through-weights: dX[0:n] = dY[0:n] @ W, where `this`
-    // is W (dim_out x dim_in), dY is (n x dim_out), dX is (n x dim_in). For
-    // each token this is a sum of dim_out scaled copies of W's rows, which is
-    // already contiguous/vectorizable in c without extra blocking.
-    // accumulate=true adds onto dX's existing contents instead of overwriting
-    // it, for callers (like the FFN) whose dx is the sum of two weights' input
-    // gradients.
     void backward_input(const Matrix& dY, Matrix& dX, int n, bool accumulate = false) const {
         int dim_in = num_cols;
         int dim_out = num_rows;
@@ -171,10 +153,6 @@ struct Matrix {
         }
     }
 
-    // Batched weight-gradient accumulation: dW[0:n rows contribute] += dY^T @ X,
-    // i.e. dW(dim_out x dim_in) += sum_i outer(dY[i], X[i]). Same contiguous
-    // accumulation pattern as backward_input, just accumulating into the
-    // weight gradient instead of the input gradient.
     static void accumulate_weight_grad(const Matrix& dY, const Matrix& X, Matrix& dW, int n) {
         int dim_out = dW.num_rows;
         int dim_in = dW.num_cols;

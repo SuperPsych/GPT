@@ -1,10 +1,6 @@
 #pragma once
 #include "matrix.h"
 
-// Whole-sequence activations for one layer's FFN. One of these is kept per
-// layer (not per token, as it used to be): batching the projections into a
-// single GEMM per layer needs the input/output laid out contiguously across
-// the whole sequence, which vector<vector<float>>-per-token can't give you.
 struct FFNActivations {
     Matrix x, z_gate, a_gate, z_up, h, out;
 
@@ -13,8 +9,6 @@ struct FFNActivations {
         z_up(max_seq_len, hidden_dim), h(max_seq_len, hidden_dim), out(max_seq_len, dim_model) {}
 };
 
-// Gradient accumulator for one layer's FFN::backward() call (whole sequence
-// at once). Cleared once per layer, not once per token.
 struct FFNDelta {
     Matrix W_gate_delta, W_up_delta, W_down_delta;
     Matrix dh, dz_gate, dz_up, dx;

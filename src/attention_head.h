@@ -50,12 +50,6 @@ struct AttentionHead {
         return out;
     }
 
-    // Writes into s.out (sized to full scratch capacity; only the first s.n
-    // rows are meaningful) instead of allocating, since this runs once per
-    // head/layer/example on the training hot path. Q/K/V projections are one
-    // GEMM each over the whole sequence (was a per-token times() loop); RoPE
-    // stays per-token since each position needs a different rotation angle,
-    // and the O(n^2) softmax attention below isn't a matmul either way.
     Matrix& forward(const Matrix& seq, AttentionScratch& s) const {
         int n = s.n;
         int dim_head = W_q.num_rows;
@@ -97,17 +91,12 @@ struct AttentionHead {
         return s.out;
     }
 
-    // Same idea: dQ/dK/dV/dx_out live in the scratch struct and get
-    // overwritten in place rather than allocated per call.
     Matrix& backward(const Matrix& grad_out, AttentionScratch& s) const {
         int n = s.n;
         int dim_head = W_q.num_rows;
         int dim_model = W_q.num_cols;
         float scale = (float)(1.0 / sqrt((double)dim_head));
 
-        // Bounded to the first n rows: these buffers have max_seq_len capacity,
-        // and a real example's n is usually far smaller, so a full-matrix
-        // clear would zero many rows this call never touches.
         fill(s.dQ.data.begin(), s.dQ.data.begin() + (size_t)n * dim_head, 0.0f);
         fill(s.dK.data.begin(), s.dK.data.begin() + (size_t)n * dim_head, 0.0f);
         fill(s.dV.data.begin(), s.dV.data.begin() + (size_t)n * dim_head, 0.0f);
@@ -140,15 +129,13 @@ struct AttentionHead {
             RoPE::rotate(dk_row, i, -1.0);
         }
 
-        // Was a per-token triple-nested outer-product loop; now one GEMM per
-        // weight matrix over the whole sequence.
         Matrix::accumulate_weight_grad(s.dQ, s.x, s.dW_q, n);
         Matrix::accumulate_weight_grad(s.dK, s.x, s.dW_k, n);
         Matrix::accumulate_weight_grad(s.dV, s.x, s.dW_v, n);
 
-        W_q.backward_input(s.dQ, s.dx_out, n, /*accumulate=*/false);
-        W_k.backward_input(s.dK, s.dx_out, n, /*accumulate=*/true);
-        W_v.backward_input(s.dV, s.dx_out, n, /*accumulate=*/true);
+        W_q.backward_input(s.dQ, s.dx_out, n, false);
+        W_k.backward_input(s.dK, s.dx_out, n, true);
+        W_v.backward_input(s.dV, s.dx_out, n, true);
         return s.dx_out;
     }
 };

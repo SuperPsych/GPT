@@ -35,9 +35,6 @@ struct ChatDataset {
         return conversations;
     }
 
-    // Role prefixes ("User: ", "Assistant: ", ...) and "<|endoftext|>" repeat
-    // identically across every one of the hundreds of thousands of turns/examples,
-    // so cache their token encodings once instead of re-running BPE on them every time.
     static ChatExample build_example(const vector<ChatTurn>& conv, const Tokenizer& tok, int max_len) {
         static unordered_map<string, vector<int>> prefix_cache;
         static const vector<int> eot_tokens = tok.encode("<|endoftext|>");
@@ -81,8 +78,6 @@ struct ChatDataset {
         return false;
     }
 
-    // Takes num_examples rather than a pre-sliced subrange so callers never need to
-    // copy conversations into a separate vector just to bound how many are used.
     static vector<ChatExample> build_examples(const vector<vector<ChatTurn>>& conversations,
                                                const Tokenizer& tok, int max_len, int num_examples) {
         int n = min((int)conversations.size(), num_examples);
@@ -95,12 +90,10 @@ struct ChatDataset {
         return examples;
     }
 
-    // Binary cache of tokenized examples, so a re-run with the same tokenizer/max_len
-    // can skip re-loading the raw dataset and re-running BPE encode() on everything.
     static void save_examples_cache(const string& path, const vector<ChatExample>& examples,
                                      int vocab_size, int max_seq_len, int num_examples) {
         ofstream out(path, ios::binary);
-        uint32_t magic = 0x43484558; // "CHEX"
+        uint32_t magic = 0x43484558;
         out.write((const char*)&magic, sizeof(magic));
         out.write((const char*)&vocab_size, sizeof(vocab_size));
         out.write((const char*)&max_seq_len, sizeof(max_seq_len));

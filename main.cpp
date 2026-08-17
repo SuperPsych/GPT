@@ -14,14 +14,11 @@ int main() {
     int batch_size = 16;
     double lr = 3e-4;
 
-    int requested_examples = num_examples; // captured before any dataset-size clamping, so the
-                                            // cache key is stable whether or not conversations get loaded
+    int requested_examples = num_examples;
 
     Tokenizer tok;
     vector<ChatExample> examples;
     {
-        // conversations only needs to be resident while building the tokenizer/examples;
-        // this block scope frees it (and any raw dataset text) before training starts.
         vector<vector<ChatTurn>> conversations;
         bool conversations_loaded = false;
 
@@ -86,7 +83,7 @@ int main() {
         }
     }
 
-    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, /*checkpoint_every=*/10000, /*log_every=*/1000);
+    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, 10000, 1000);
 
     gpt.save_checkpoint(checkpoint_path);
     cout << "Final checkpoint saved to " << checkpoint_path << endl;

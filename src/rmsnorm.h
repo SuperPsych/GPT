@@ -8,15 +8,6 @@ struct RMSNorm {
 
     RMSNorm(int dim_model) : g(dim_model, 1.0f) {}
 
-    // In-place: writes into a caller-owned buffer instead of allocating. Used
-    // on the training hot path, which calls this per token/layer/example and
-    // would otherwise spend more time in malloc than in the actual math.
-    // The reduction (ms) and the rsqrt derived from it are kept in double:
-    // it's an inverse-sqrt feeding every output element, so precision here
-    // is worth the (negligible, since dim_model is small) extra cost.
-    // Templated over VecX/VecOut so it works on both vector<float>& and a
-    // Matrix row (span<float>) without a copy — RMSNorm isn't a matmul, so it
-    // stays a per-token op even where the surrounding buffers are GEMM'd.
     template <typename VecX, typename VecOut>
     void forward(const VecX& x, VecOut& out) const {
         double ms = 0;

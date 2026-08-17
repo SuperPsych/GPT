@@ -7,35 +7,28 @@ struct GPTScratch {
     int n = 0;
     vector<int> tokens;
 
-    // RMSNorm inputs/snapshots stay per-token (vector<vector<float>>): RMSNorm
-    // itself is elementwise, not a matmul, so there's no GEMM benefit to a
-    // contiguous layout here, unlike the buffers below.
     vector<vector<vector<float>>> x_pre_attn;
     vector<vector<vector<float>>> x_pre_ffn;
     vector<vector<float>> x_pre_final;
-    vector<Matrix> concat; // per layer: (max_seq_len, num_heads*dim_head), GEMM input to W_o
+    vector<Matrix> concat;
 
-    // Whole-sequence working buffers for forward_train()/backward(). Matrix
-    // (not vector<vector<float>>) because they're operands to the batched
-    // GEMM calls in Matrix::times/backward_input/accumulate_weight_grad,
-    // which need contiguous per-sequence storage, not per-token vectors.
-    Matrix x_buf;            // forward: running residual stream
-    Matrix normed_buf;       // forward: attn_norm/ffn_norm output (reused for both, sequentially)
-    Matrix proj_buf;         // forward: W_o projection output, whole sequence
-    Matrix normed_final_buf; // forward: final_norm output, whole sequence (kept for the dW_u GEMM in backward)
-    Matrix logits_buf;       // forward: output logits
-    Matrix grad_logits;      // backward input, staged by accumulate_gradients
+    Matrix x_buf;
+    Matrix normed_buf;
+    Matrix proj_buf;
+    Matrix normed_final_buf;
+    Matrix logits_buf;
+    Matrix grad_logits;
 
-    Matrix dx_buf;              // backward: running gradient stream
-    Matrix dnormed_final_buf;   // backward: dL/d(final_norm output), whole sequence
-    vector<float> dattn_norm_scratch; // backward: attn_norm backward output, one token (must accumulate into dx_buf, not overwrite)
-    vector<float> dffn_norm_scratch;  // backward: ffn_norm backward output, one token (same reason)
-    Matrix dconcat_buf;         // backward: dL/d(concat), whole sequence
-    Matrix dnormed_attn_buf;    // backward: accumulated across heads, whole sequence
+    Matrix dx_buf;
+    Matrix dnormed_final_buf;
+    vector<float> dattn_norm_scratch;
+    vector<float> dffn_norm_scratch;
+    Matrix dconcat_buf;
+    Matrix dnormed_attn_buf;
 
     vector<vector<AttentionScratch>> attn_scratch;
-    vector<FFNActivations> ffn_cache; // per layer (whole sequence), not per (layer, token)
-    FFNDelta ffn_delta;                // single shared instance, cleared once per layer now (was once per token)
+    vector<FFNActivations> ffn_cache;
+    FFNDelta ffn_delta;
 
     Matrix dW_e, dW_u;
     vector<Matrix> dW_o;
