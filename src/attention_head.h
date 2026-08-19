@@ -11,9 +11,9 @@ struct AttentionHead {
     AttentionHead(int dim_head, int dim_model, int max_seq_len) :
         W_q(dim_head, dim_model), W_k(dim_head, dim_model), W_v(dim_head, dim_model),
         K(0, dim_head), V(0, dim_head) {
-        W_q.randomize();
-        W_k.randomize();
-        W_v.randomize();
+        W_q.randomize_xavier();
+        W_k.randomize_xavier();
+        W_v.randomize_xavier();
         K.reserve_rows(max_seq_len);
         V.reserve_rows(max_seq_len);
     }
@@ -103,25 +103,45 @@ struct AttentionHead {
         fill(s.dK.data.begin(), s.dK.data.begin() + (size_t)n * dim_head, 0.0f);
         fill(s.dV.data.begin(), s.dV.data.begin() + (size_t)n * dim_head, 0.0f);
 
+        thread_local vector<float> grad_out_row, q_row, dq_acc;
+        if ((int)grad_out_row.size() < dim_head) {
+            grad_out_row.resize(dim_head);
+            q_row.resize(dim_head);
+            dq_acc.resize(dim_head);
+        }
+
         for (int i = 0; i < n; i++) {
+            const float* grad_out_i = &grad_out.data[(size_t)i * grad_out.num_cols];
+            copy(grad_out_i, grad_out_i + dim_head, grad_out_row.begin());
+            const float* q_i = &s.Q.data[(size_t)i * s.Q.num_cols];
+            copy(q_i, q_i + dim_head, q_row.begin());
+
             for (int j = 0; j <= i; j++) {
                 float p = s.P.at(i,j);
                 float dp = 0;
+                const float* v_j = &s.V.data[(size_t)j * s.V.num_cols];
+                float* dv_j = &s.dV.data[(size_t)j * s.dV.num_cols];
                 for (int d = 0; d < dim_head; d++) {
-                    s.dV.at(j,d) += p * grad_out.at(i,d);
-                    dp += grad_out.at(i,d) * s.V.at(j,d);
+                    dv_j[d] += p * grad_out_row[d];
+                    dp += grad_out_row[d] * v_j[d];
                 }
                 s.dP[j] = dp;
             }
             float weighted = 0;
             for (int j = 0; j <= i; j++) weighted += s.P.at(i,j) * s.dP[j];
+
+            fill(dq_acc.begin(), dq_acc.begin() + dim_head, 0.0f);
             for (int j = 0; j <= i; j++) {
                 float dscore = s.P.at(i,j) * (s.dP[j] - weighted) * scale;
+                const float* k_j = &s.K.data[(size_t)j * s.K.num_cols];
+                float* dk_j = &s.dK.data[(size_t)j * s.dK.num_cols];
                 for (int d = 0; d < dim_head; d++) {
-                    s.dQ.at(i,d) += dscore * s.K.at(j,d);
-                    s.dK.at(j,d) += dscore * s.Q.at(i,d);
+                    dq_acc[d] += dscore * k_j[d];
+                    dk_j[d] += dscore * q_row[d];
                 }
             }
+            float* dq_i = &s.dQ.data[(size_t)i * s.dQ.num_cols];
+            for (int d = 0; d < dim_head; d++) dq_i[d] += dq_acc[d];
         }
 
         for (int i = 0; i < n; i++) {

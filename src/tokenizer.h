@@ -17,26 +17,157 @@ struct Tokenizer {
     unordered_map<string, int> token_to_id;
     vector<pair<string,string>> merges;
     unordered_map<string, int> merge_rank;
-    vector<string> special_tokens = {"<|endoftext|>", "<|unk|>", "<|pad|>", "<|mask|>"};
-    bool lowercase = true;
-    bool split_punctuation = true;
-    bool normalize_whitespace = true;
+    vector<string> special_tokens = {"<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|pad|>"};
 
     int vocab_size() const { return (int)id_to_token.size(); }
 
+    static const array<int,256>& byte_to_unicode() {
+        static array<int,256> table = [] {
+            array<int,256> t{};
+            array<bool,256> assigned{};
+            vector<int> bs;
+            for (int b = 33; b <= 126; b++) bs.push_back(b);
+            for (int b = 161; b <= 172; b++) bs.push_back(b);
+            for (int b = 174; b <= 255; b++) bs.push_back(b);
+            for (int b : bs) assigned[b] = true;
+            for (int b : bs) t[b] = b;
+            int n = 0;
+            for (int b = 0; b < 256; b++) {
+                if (!assigned[b]) {
+                    t[b] = 256 + n;
+                    n++;
+                }
+            }
+            return t;
+        }();
+        return table;
+    }
+    static const unordered_map<int,int>& unicode_to_byte() {
+        static unordered_map<int,int> inv = [] {
+            unordered_map<int,int> m;
+            const auto& t = byte_to_unicode();
+            for (int b = 0; b < 256; b++) m[t[b]] = b;
+            return m;
+        }();
+        return inv;
+    }
+
+    static string utf8_encode_cp(int cp) {
+        string out;
+        if (cp < 0x80) {
+            out += (char)cp;
+        } else if (cp < 0x800) {
+            out += (char)(0xC0 | (cp >> 6));
+            out += (char)(0x80 | (cp & 0x3F));
+        } else {
+            out += (char)(0xE0 | (cp >> 12));
+            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+            out += (char)(0x80 | (cp & 0x3F));
+        }
+        return out;
+    }
+    static int utf8_decode_cp(const string& text, size_t& i) {
+        unsigned char c0 = text[i];
+        if ((c0 & 0x80) == 0) { i += 1; return c0; }
+        if ((c0 & 0xE0) == 0xC0 && i + 1 < text.size()) {
+            int cp = ((c0 & 0x1F) << 6) | ((unsigned char)text[i+1] & 0x3F);
+            i += 2; return cp;
+        }
+        if ((c0 & 0xF0) == 0xE0 && i + 2 < text.size()) {
+            int cp = ((c0 & 0x0F) << 12) | (((unsigned char)text[i+1] & 0x3F) << 6) | ((unsigned char)text[i+2] & 0x3F);
+            i += 3; return cp;
+        }
+        if ((c0 & 0xF8) == 0xF0 && i + 3 < text.size()) {
+            int cp = ((c0 & 0x07) << 18) | (((unsigned char)text[i+1] & 0x3F) << 12)
+                   | (((unsigned char)text[i+2] & 0x3F) << 6) | ((unsigned char)text[i+3] & 0x3F);
+            i += 4; return cp;
+        }
+        i += 1; return c0;
+    }
+
+    static string bytes_to_symbol_string(const string& raw_bytes) {
+        string out;
+        out.reserve(raw_bytes.size() * 2);
+        for (unsigned char b : raw_bytes) out += utf8_encode_cp(byte_to_unicode()[b]);
+        return out;
+    }
+    static string symbol_string_to_bytes(const string& sym) {
+        string out;
+        size_t i = 0;
+        while (i < sym.size()) {
+            int cp = utf8_decode_cp(sym, i);
+            auto it = unicode_to_byte().find(cp);
+            out += (char)(it != unicode_to_byte().end() ? it->second : (cp & 0xFF));
+        }
+        return out;
+    }
+    static vector<string> symbol_string_to_chars(const string& sym) {
+        vector<string> out;
+        size_t i = 0;
+        while (i < sym.size()) {
+            size_t start = i;
+            utf8_decode_cp(sym, i);
+            out.push_back(sym.substr(start, i - start));
+        }
+        return out;
+    }
+
+    enum class CharClass { WS, DIGIT, PUNCT, OTHER };
+    static CharClass classify(unsigned char c) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') return CharClass::WS;
+        if (c < 0x80 && isdigit(c)) return CharClass::DIGIT;
+        if (c < 0x80 && ispunct(c)) return CharClass::PUNCT;
+        return CharClass::OTHER;
+    }
+    static vector<string> pretokenize_bytes(const string& text) {
+        vector<string> chunks;
+        size_t n = text.size(), i = 0;
+        while (i < n) {
+            CharClass cls = classify((unsigned char)text[i]);
+            size_t j = i + 1;
+            while (j < n && classify((unsigned char)text[j]) == cls) j++;
+
+            if (cls == CharClass::WS && j < n) {
+                if (j - i > 1) chunks.push_back(text.substr(i, j - i - 1));
+                size_t fold_start = j - 1;
+                CharClass next_cls = classify((unsigned char)text[j]);
+                size_t k = j + 1;
+                while (k < n && classify((unsigned char)text[k]) == next_cls) k++;
+                chunks.push_back(text.substr(fold_start, k - fold_start));
+                i = k;
+            } else {
+                chunks.push_back(text.substr(i, j - i));
+                i = j;
+            }
+        }
+        return chunks;
+    }
+
+    static vector<string> apply_merge(const vector<string>& word, const string& first, const string& second) {
+        vector<string> result;
+        size_t i = 0;
+        while (i < word.size()) {
+            if (i < word.size() - 1 && word[i] == first && word[i + 1] == second) {
+                result.push_back(first + second);
+                i += 2;
+            } else {
+                result.push_back(word[i]);
+                i++;
+            }
+        }
+        return result;
+    }
+
     void train(const string& corpus_path, int target_vocab_size, int min_frequency,
                const string& vocab_out_path, const string& merges_out_path) {
-        ifstream file(corpus_path);
+        ifstream file(corpus_path, ios::binary);
+        string text((istreambuf_iterator<char>(file)), istreambuf_iterator<char>());
+
         unordered_map<vector<string>, long long, VectorStringHash> word_freqs;
-        string line;
-        while (getline(file, line)) {
-            if (line.empty()) continue;
-            string normalized = normalize(line, lowercase, split_punctuation, normalize_whitespace);
-            istringstream iss(normalized);
-            string word;
-            while (iss >> word) {
-                word_freqs[word_to_chars(word)]++;
-            }
+        for (auto& chunk : pretokenize_bytes(text)) {
+            if (chunk.empty()) continue;
+            string sym = bytes_to_symbol_string(chunk);
+            word_freqs[symbol_string_to_chars(sym)]++;
         }
 
         vector<vector<string>> words;
@@ -49,7 +180,7 @@ struct Tokenizer {
         }
 
         unordered_set<string> vocabulary;
-        for (auto& w : words) for (auto& sym : w) vocabulary.insert(sym);
+        for (int b = 0; b < 256; b++) vocabulary.insert(utf8_encode_cp(byte_to_unicode()[b]));
         for (auto& special : special_tokens) vocabulary.insert(special);
 
         unordered_map<string, long long> pair_counts;
@@ -99,7 +230,7 @@ struct Tokenizer {
             pair_counts.erase(key);
         }
 
-        ofstream vf(vocab_out_path);
+        ofstream vf(vocab_out_path, ios::binary);
         for (auto& s : special_tokens) vf << s << "\n";
         vector<string> rest;
         for (auto& t : vocabulary) {
@@ -111,7 +242,7 @@ struct Tokenizer {
         for (auto& t : rest) vf << t << "\n";
         vf.close();
 
-        ofstream mf(merges_out_path);
+        ofstream mf(merges_out_path, ios::binary);
         mf << "#version: 0.2\n";
         for (auto& m : merges_out) mf << m.first << " " << m.second << "\n";
         mf.close();
@@ -122,18 +253,20 @@ struct Tokenizer {
     void load(const string& vocab_path, const string& merges_path) {
         id_to_token.clear();
         token_to_id.clear();
-        ifstream vf(vocab_path);
+        ifstream vf(vocab_path, ios::binary);
         string line;
         while (getline(vf, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             token_to_id[line] = (int)id_to_token.size();
             id_to_token.push_back(line);
         }
 
         merges.clear();
-        ifstream mf(merges_path);
+        ifstream mf(merges_path, ios::binary);
         bool first = true;
         while (getline(mf, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             if (first) {
                 first = false;
@@ -150,81 +283,12 @@ struct Tokenizer {
         }
     }
 
-    static string normalize(const string& text, bool lowercase, bool split_punct, bool norm_ws) {
-        string result = text;
-        if (norm_ws) {
-            string out;
-            out.reserve(result.size());
-            bool in_ws = false;
-            for (unsigned char c : result) {
-                if (isspace(c)) {
-                    if (!in_ws) { out += ' '; in_ws = true; }
-                } else {
-                    out += (char)c;
-                    in_ws = false;
-                }
-            }
-            result = move(out);
-        }
-        if (split_punct) {
-            static const string punct_chars = ".,!?;:()[]{}\"'";
-            string out;
-            out.reserve(result.size() * 2);
-            for (char c : result) {
-                if (punct_chars.find(c) != string::npos) {
-                    out += ' ';
-                    out += c;
-                    out += ' ';
-                } else {
-                    out += c;
-                }
-            }
-            result = move(out);
-        }
-        if (lowercase) {
-            transform(result.begin(), result.end(), result.begin(), ::tolower);
-        }
-        return result;
-    }
-
-    static vector<string> word_to_chars(const string& word) {
-        vector<string> chars;
-        for (size_t i = 0; i < word.size(); ) {
-            unsigned char c = word[i];
-            size_t char_len = 1;
-            if ((c & 0x80) == 0) char_len = 1;
-            else if ((c & 0xE0) == 0xC0) char_len = 2;
-            else if ((c & 0xF0) == 0xE0) char_len = 3;
-            else if ((c & 0xF8) == 0xF0) char_len = 4;
-            chars.push_back(word.substr(i, char_len));
-            i += char_len;
-        }
-        if (!chars.empty()) chars.back() += "</w>";
-        return chars;
-    }
-
-    static vector<string> apply_merge(const vector<string>& word, const string& first, const string& second) {
-        vector<string> result;
-        size_t i = 0;
-        while (i < word.size()) {
-            if (i < word.size() - 1 && word[i] == first && word[i + 1] == second) {
-                result.push_back(first + second);
-                i += 2;
-            } else {
-                result.push_back(word[i]);
-                i++;
-            }
-        }
-        return result;
-    }
-
     vector<string> tokenize_to_strings(const string& text) const {
-        string normalized = normalize(text, lowercase, split_punctuation, normalize_whitespace);
-        istringstream iss(normalized);
-        string word;
         vector<string> result;
-        while (iss >> word) {
-            auto chars = word_to_chars(word);
+        for (auto& chunk : pretokenize_bytes(text)) {
+            if (chunk.empty()) continue;
+            string sym = bytes_to_symbol_string(chunk);
+            vector<string> chars = symbol_string_to_chars(sym);
             while (chars.size() > 1) {
                 int best_rank = INT_MAX;
                 size_t best_i = string::npos;
@@ -250,7 +314,7 @@ struct Tokenizer {
             if (buffer.empty()) return;
             for (auto& tok : tokenize_to_strings(buffer)) {
                 auto it = token_to_id.find(tok);
-                ids.push_back(it != token_to_id.end() ? it->second : token_to_id.at("<|unk|>"));
+                ids.push_back(it != token_to_id.end() ? it->second : 0);
             }
             buffer.clear();
         };
@@ -278,31 +342,19 @@ struct Tokenizer {
     }
 
     string decode(const vector<int>& ids) const {
-        static const string marker = "</w>";
-        string out, word;
+        string sym_concat, out;
         for (int id : ids) {
             if (id < 0 || id >= (int)id_to_token.size()) continue;
-            string tok = id_to_token[id];
-
+            const string& tok = id_to_token[id];
             bool is_special = find(special_tokens.begin(), special_tokens.end(), tok) != special_tokens.end();
             if (is_special) {
-                if (!word.empty()) { out += word; word.clear(); }
-                if (!out.empty() && out.back() != ' ') out += ' ';
-                out += tok + " ";
-                continue;
-            }
-
-            bool end_of_word = tok.size() >= marker.size() &&
-                tok.compare(tok.size() - marker.size(), marker.size(), marker) == 0;
-            if (end_of_word) tok = tok.substr(0, tok.size() - marker.size());
-            word += tok;
-            if (end_of_word) {
-                out += word + " ";
-                word.clear();
+                if (!sym_concat.empty()) { out += symbol_string_to_bytes(sym_concat); sym_concat.clear(); }
+                out += tok;
+            } else {
+                sym_concat += tok;
             }
         }
-        out += word;
-        if (!out.empty() && out.back() == ' ') out.pop_back();
+        if (!sym_concat.empty()) out += symbol_string_to_bytes(sym_concat);
         return out;
     }
 

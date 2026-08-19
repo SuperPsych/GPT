@@ -6,12 +6,13 @@ struct FFN {
     Matrix W_gate, W_up, W_down;
     int dim_model, hidden_dim;
 
-    FFN(int dim_model, int hidden_dim) :
+    FFN(int dim_model, int hidden_dim, int num_layers) :
         W_gate(hidden_dim, dim_model), W_up(hidden_dim, dim_model), W_down(dim_model, hidden_dim),
         dim_model(dim_model), hidden_dim(hidden_dim) {
-        W_gate.randomize();
-        W_up.randomize();
-        W_down.randomize();
+        W_gate.randomize_xavier();
+        W_up.randomize_xavier();
+        float down_std = (float)(sqrt(1.0 / W_down.num_cols) / sqrt(2.0 * num_layers));
+        W_down.randomize(down_std);
     }
 
     static void SiLU(vector<float> &x) {

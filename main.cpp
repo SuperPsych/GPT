@@ -1,4 +1,5 @@
 #include "src/gpt.h"
+#include "src/config.h"
 
 int main() {
     string dataset_path = "data/smoltalk_train_pages.jsonl";
@@ -8,11 +9,11 @@ int main() {
     string checkpoint_path = "data/checkpoint.txt";
     string examples_cache_path = "data/examples_cache.bin";
 
-    int num_layers = 2, num_heads = 2, dim_head = 32, dim_model = 64, hidden_dim = 192;
-    int target_vocab = 2000, max_seq_len = 512;
-    int num_examples = 500000, epochs = 4;
-    int batch_size = 16;
-    double lr = 3e-4;
+    int num_layers = NUM_LAYERS, num_heads = NUM_HEADS, dim_head = DIM_HEAD;
+    int dim_model = DIM_MODEL, hidden_dim = HIDDEN_DIM;
+    int target_vocab = TARGET_VOCAB, max_seq_len = MAX_SEQ_LEN;
+    int num_examples = NUM_EXAMPLES, epochs = EPOCHS;
+    int batch_size = BATCH_SIZE;
 
     int requested_examples = num_examples;
 
@@ -63,10 +64,13 @@ int main() {
     GPT gpt(num_layers, num_heads, dim_head, dim_model, hidden_dim, tok.vocab_size(), max_seq_len);
     gpt.tokenizer = tok;
 
+    AdamState resume_opt(num_layers, num_heads, dim_head, dim_model, hidden_dim, tok.vocab_size());
+    bool resumed = false;
+
     ifstream ckpt_check(checkpoint_path);
     if (ckpt_check.good()) {
         cout << "Loading checkpoint from " << checkpoint_path << "..." << endl;
-        gpt = GPT::load_checkpoint(checkpoint_path);
+        gpt = GPT::load_checkpoint(checkpoint_path, &resume_opt);
         gpt.tokenizer = tok;
         if (gpt.vocab_size != tok.vocab_size()) {
             cerr << "Fatal: checkpoint vocab_size (" << gpt.vocab_size
@@ -81,28 +85,18 @@ int main() {
                     "this checkpoint's architecture." << endl;
             return 1;
         }
-    }
-
-    gpt.train(examples, epochs, lr, batch_size, checkpoint_path, 8192, 1024);
-
-    gpt.save_checkpoint(checkpoint_path);
-    cout << "Final checkpoint saved to " << checkpoint_path << endl;
-
-    cout << "\nSample generation (greedy decode):" << endl;
-    gpt.reset_cache();
-    string prompt = "User: hello\nAssistant:";
-    auto prompt_ids = gpt.tokenize(prompt);
-    vector<int> generated = prompt_ids;
-    vector<float> logits;
-    for (int id : prompt_ids) logits = gpt.generate_step(id);
-    for (int step = 0; step < 40; step++) {
-        int best = 0;
-        float best_val = -1e18f;
-        for (int v = 0; v < gpt.vocab_size; v++) {
-            if (logits[v] > best_val) { best_val = logits[v]; best = v; }
+        if (gpt.num_layers != num_layers || gpt.num_heads != num_heads || gpt.dim_head != dim_head ||
+            gpt.dim_model != dim_model || gpt.hidden_dim != hidden_dim) {
+            cerr << "Fatal: checkpoint architecture (layers=" << gpt.num_layers << " heads=" << gpt.num_heads
+                 << " dim_head=" << gpt.dim_head << " dim_model=" << gpt.dim_model << " hidden=" << gpt.hidden_dim
+                 << ") does not match the configured architecture (layers=" << num_layers << " heads=" << num_heads
+                 << " dim_head=" << dim_head << " dim_model=" << dim_model << " hidden=" << hidden_dim
+                 << "). Move or delete the checkpoint to start a fresh run with this config." << endl;
+            return 1;
         }
-        generated.push_back(best);
-        logits = gpt.generate_step(best);
+        resumed = true;
     }
-    cout << gpt.detokenize(generated) << endl;
+
+    gpt.train(examples, epochs, batch_size, checkpoint_path, CHECKPOINT_EVERY, LOG_EVERY,
+              resumed ? &resume_opt : nullptr);
 }

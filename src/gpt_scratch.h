@@ -16,8 +16,6 @@ struct GPTScratch {
     Matrix normed_buf;
     Matrix proj_buf;
     Matrix normed_final_buf;
-    Matrix logits_buf;
-    Matrix grad_logits;
 
     Matrix dx_buf;
     Matrix dnormed_final_buf;
@@ -26,11 +24,17 @@ struct GPTScratch {
     Matrix dconcat_buf;
     Matrix dnormed_attn_buf;
 
+    vector<int> scored_idx;
+    Matrix normed_scored;
+    Matrix logits_scored;
+    Matrix grad_logits_scored;
+    Matrix dnormed_scored;
+
     vector<vector<AttentionScratch>> attn_scratch;
     vector<FFNActivations> ffn_cache;
     FFNDelta ffn_delta;
 
-    Matrix dW_e, dW_u;
+    Matrix dW_e;
     vector<Matrix> dW_o;
     vector<Matrix> dW_ffn_gate, dW_ffn_up, dW_ffn_down;
     vector<vector<float>> dg_attn_norms;
@@ -45,16 +49,19 @@ struct GPTScratch {
         normed_buf(max_seq_len, dim_model),
         proj_buf(max_seq_len, dim_model),
         normed_final_buf(max_seq_len, dim_model),
-        logits_buf(max_seq_len, vocab_size),
-        grad_logits(max_seq_len, vocab_size),
         dx_buf(max_seq_len, dim_model),
         dnormed_final_buf(max_seq_len, dim_model),
         dattn_norm_scratch(dim_model),
         dffn_norm_scratch(dim_model),
         dconcat_buf(max_seq_len, num_heads * dim_head),
         dnormed_attn_buf(max_seq_len, dim_model),
+        scored_idx(max_seq_len, 0),
+        normed_scored(max_seq_len, dim_model),
+        logits_scored(max_seq_len, vocab_size),
+        grad_logits_scored(max_seq_len, vocab_size),
+        dnormed_scored(max_seq_len, dim_model),
         ffn_delta(max_seq_len, dim_model, hidden_dim),
-        dW_e(vocab_size, dim_model), dW_u(vocab_size, dim_model),
+        dW_e(vocab_size, dim_model),
         dg_attn_norms(num_layers, vector<float>(dim_model, 0.0f)),
         dg_ffn_norms(num_layers, vector<float>(dim_model, 0.0f)),
         dg_final_norm(dim_model, 0.0f) {
@@ -95,7 +102,6 @@ struct GPTScratch {
 
     void clear() {
         Matrix::clear(dW_e);
-        Matrix::clear(dW_u);
         for (auto& m : dW_o) Matrix::clear(m);
         for (auto& m : dW_ffn_gate) Matrix::clear(m);
         for (auto& m : dW_ffn_up) Matrix::clear(m);

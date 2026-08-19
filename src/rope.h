@@ -6,7 +6,7 @@
 using namespace std;
 
 struct RoPE {
-    using Angles = vector<pair<float, float>>; // (cos, sin) per frequency pair, indexed by position
+    using Angles = vector<pair<float, float>>;
 
     static unordered_map<int, vector<Angles>>& tables() {
         static unordered_map<int, vector<Angles>> t;
@@ -23,10 +23,6 @@ struct RoPE {
         return angles;
     }
 
-    // Precomputes cos/sin for positions [0, max_pos) for a given head dimension so that
-    // rotate() becomes a pure table lookup instead of recomputing pow/cos/sin every call.
-    // Must be called once, single-threaded, before any concurrent (OpenMP) use, since it
-    // mutates the shared table; rotate() itself only reads it once populated.
     static void precompute(int dim, int max_pos) {
         auto& table = tables()[dim];
         if ((int)table.size() < max_pos) table.resize(max_pos);
@@ -47,8 +43,6 @@ struct RoPE {
 
         Angles fallback;
         if (!angles) {
-            // Position beyond the precomputed range (e.g. generation past max_seq_len).
-            // Computed into a local so this stays safe even if called concurrently.
             fallback = compute(dim, pos);
             angles = &fallback;
         }

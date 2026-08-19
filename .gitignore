@@ -8,5 +8,4 @@
 data/*
 !data/vocab.txt
 !data/merges.txt
-!data/tokenizer_corpus.txt
 !data/checkpoint.txt

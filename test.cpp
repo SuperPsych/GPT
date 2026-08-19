@@ -39,10 +39,10 @@ int main() {
         return 1;
     }
 
-    int eot_id = tok.token_to_id.count("<|endoftext|>") ? tok.token_to_id.at("<|endoftext|>") : -1;
+    int im_end_id = tok.token_to_id.count("<|im_end|>") ? tok.token_to_id.at("<|im_end|>") : -1;
     int max_new_tokens = 200;
     double temperature = 0.8;
-    int top_k = 10;
+    int top_k = 20;
     mt19937 rng(random_device{}());
 
     cout << "\nInteractive mode. Type a message and press Enter (empty line, \"exit\", or \"quit\" to stop).\n" << endl;
@@ -54,7 +54,7 @@ int main() {
         if (line.empty() || line == "exit" || line == "quit") break;
 
         gpt.reset_cache();
-        string prompt = "User: " + line + "\nAssistant:";
+        string prompt = "<|im_start|>user\n" + line + "<|im_end|>\n<|im_start|>assistant\n";
         auto prompt_ids = gpt.tokenize(prompt);
 
         vector<int> generated;
@@ -62,7 +62,7 @@ int main() {
         for (int id : prompt_ids) logits = gpt.generate_step(id);
         for (int step = 0; step < max_new_tokens; step++) {
             int next = sample_token(logits, temperature, top_k, rng);
-            if (next == eot_id) break;
+            if (next == im_end_id) break;
             generated.push_back(next);
             logits = gpt.generate_step(next);
         }

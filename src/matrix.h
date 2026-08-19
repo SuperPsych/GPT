@@ -25,14 +25,10 @@ struct Matrix {
         return data[r * num_cols + c];
     }
 
-    // Reserves capacity for `rows` rows without changing size, so a subsequent
-    // run of add_row() up to that many rows never reallocates.
     void reserve_rows(int rows) {
         data.reserve((size_t)rows * num_cols);
     }
 
-    // Resets to zero rows while keeping any reserved capacity (unlike
-    // assigning a fresh Matrix, which would drop it).
     void clear_rows() {
         data.clear();
         num_rows = 0;
@@ -49,14 +45,22 @@ struct Matrix {
         return span<float>(data.data() + r * num_cols, num_cols);
     }
 
-    void randomize() {
-        random_device rd;
-        mt19937 gen(rd());
-        float std_dev = (float)sqrt(2.0 / num_cols);
+    static mt19937& rng() {
+        static mt19937 gen(42);
+        return gen;
+    }
+    static void seed(unsigned s) {
+        rng().seed(s);
+    }
+
+    void randomize(float std_dev) {
         normal_distribution<float> dist(0.0f, std_dev);
         for (float& value : data) {
-            value = dist(gen);
+            value = dist(rng());
         }
+    }
+    void randomize_xavier() {
+        randomize((float)sqrt(1.0 / num_cols));
     }
 
     static void add(vector<float> &a, const vector<float> &b) {
@@ -82,27 +86,43 @@ struct Matrix {
         clear(a.data);
     }
 
+    static double squared_norm(const vector<float>& a) {
+        double s = 0;
+        for (float v : a) s += (double)v * v;
+        return s;
+    }
+    static double squared_norm(const Matrix& a) {
+        return squared_norm(a.data);
+    }
+    static void scale(vector<float>& a, float s) {
+        for (float& v : a) v *= s;
+    }
+    static void scale(Matrix& a, float s) {
+        scale(a.data, s);
+    }
+
     static void adamw_update(vector<float>& W, const vector<float>& dW, vector<float>& m, vector<float>& v,
-                              double lr, double beta1, double beta2, double eps, double weight_decay,
-                              int t, double grad_scale) {
-        double bc1 = 1.0 - pow(beta1, t);
-        double bc2 = 1.0 - pow(beta2, t);
+                              float lr, float beta1, float beta2, float eps, float weight_decay,
+                              int t, float grad_scale) {
+        float bc1 = 1.0f - powf(beta1, (float)t);
+        float bc2 = 1.0f - powf(beta2, (float)t);
         for (size_t i = 0; i < W.size(); i++) {
-            double g = dW[i] * grad_scale;
-            double m_new = beta1 * m[i] + (1 - beta1) * g;
-            double v_new = beta2 * v[i] + (1 - beta2) * g * g;
-            m[i] = (float)m_new;
-            v[i] = (float)v_new;
-            double m_hat = m_new / bc1;
-            double v_hat = v_new / bc2;
-            W[i] -= (float)(lr * (m_hat / (sqrt(v_hat) + eps) + weight_decay * W[i]));
+            float g = dW[i] * grad_scale;
+            float m_new = beta1 * m[i] + (1 - beta1) * g;
+            float v_new = beta2 * v[i] + (1 - beta2) * g * g;
+            m[i] = m_new;
+            v[i] = v_new;
+            float m_hat = m_new / bc1;
+            float v_hat = v_new / bc2;
+            W[i] -= lr * (m_hat / (sqrtf(v_hat) + eps) + weight_decay * W[i]);
         }
     }
     static void adamw_update(Matrix& W, const Matrix& dW, Matrix& m, Matrix& v,
-                              double lr, double beta1, double beta2, double eps, double weight_decay,
-                              int t, double grad_scale) {
+                              float lr, float beta1, float beta2, float eps, float weight_decay,
+                              int t, float grad_scale) {
         adamw_update(W.data, dW.data, m.data, v.data, lr, beta1, beta2, eps, weight_decay, t, grad_scale);
     }
+
     void times(const vector<float>& x, span<float> y) const {
         for (int r = 0; r < num_rows; r++) {
             int base = r * num_cols;
@@ -154,15 +174,34 @@ struct Matrix {
     void backward_input(const Matrix& dY, Matrix& dX, int n, bool accumulate = false) const {
         int dim_in = num_cols;
         int dim_out = num_rows;
+
+        thread_local vector<float> acc;
+        if ((int)acc.size() < dim_in) acc.resize(dim_in);
+
         for (int i = 0; i < n; i++) {
             float* dxi = &dX.data[(size_t)i * dim_in];
-            if (!accumulate) fill(dxi, dxi + dim_in, 0.0f);
             const float* dyi = &dY.data[(size_t)i * dY.num_cols];
-            for (int r = 0; r < dim_out; r++) {
-                float g = dyi[r];
-                const float* wr = &data[(size_t)r * dim_in];
-                for (int c = 0; c < dim_in; c++) dxi[c] += g * wr[c];
+
+            if (accumulate) copy(dxi, dxi + dim_in, acc.begin());
+            else fill(acc.begin(), acc.begin() + dim_in, 0.0f);
+
+            int r = 0;
+            for (; r + 2 <= dim_out; r += 2) {
+                const float* w0 = &data[(size_t)(r + 0) * dim_in];
+                const float* w1 = &data[(size_t)(r + 1) * dim_in];
+                float g0 = dyi[r + 0], g1 = dyi[r + 1];
+                for (int c = 0; c < dim_in; c++) {
+                    acc[c] += g0 * w0[c];
+                    acc[c] += g1 * w1[c];
+                }
             }
+            for (; r < dim_out; r++) {
+                const float* wr = &data[(size_t)r * dim_in];
+                float g = dyi[r];
+                for (int c = 0; c < dim_in; c++) acc[c] += g * wr[c];
+            }
+
+            copy(acc.begin(), acc.begin() + dim_in, dxi);
         }
     }
 
@@ -186,6 +225,29 @@ struct Matrix {
             res += a[i] * b[i];
         }
         return res;
+    }
+
+    void save_bin(ostream& out) const {
+        out.write((const char*)&num_rows, sizeof(num_rows));
+        out.write((const char*)&num_cols, sizeof(num_cols));
+        out.write((const char*)data.data(), (streamsize)(data.size() * sizeof(float)));
+    }
+    void load_bin(istream& in) {
+        in.read((char*)&num_rows, sizeof(num_rows));
+        in.read((char*)&num_cols, sizeof(num_cols));
+        data.resize((size_t)num_rows * num_cols);
+        in.read((char*)data.data(), (streamsize)(data.size() * sizeof(float)));
+    }
+    static void save_vec_bin(ostream& out, const vector<float>& v) {
+        uint64_t n = v.size();
+        out.write((const char*)&n, sizeof(n));
+        out.write((const char*)v.data(), (streamsize)(v.size() * sizeof(float)));
+    }
+    static void load_vec_bin(istream& in, vector<float>& v) {
+        uint64_t n = 0;
+        in.read((char*)&n, sizeof(n));
+        v.resize((size_t)n);
+        in.read((char*)v.data(), (streamsize)(v.size() * sizeof(float)));
     }
 
     void save(ostream& out) const {
